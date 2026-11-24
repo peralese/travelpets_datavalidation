@@ -222,3 +222,29 @@ def test_overture_website_filter():
     assert _own_site("https://www.hotelx.com/")
     assert not _own_site("https://www.hotels.com/ho123") and not _own_site("https://linktr.ee/thedriskill")
     assert not _own_site("https://m.facebook.com/somehotel")
+
+
+# --- Google cache (yearly runs must not reuse last year's answers) -------
+def _client(tmp_path, **kw):
+    from hotel_validator.places import PlacesClient
+    c = PlacesClient("k", cache_path=str(tmp_path / "c.sqlite"), **kw)
+    c._post = lambda body: (setattr(c, "calls", c.calls + 1), {"places": []})[1]
+    return c
+
+
+def test_cache_reused_within_a_run_but_expires(tmp_path):
+    import time
+    c = _client(tmp_path)
+    c.search("Hotel A"); c.search("Hotel A")
+    assert c.calls == 1 and c.is_cached("Hotel A")
+    c._db.execute("UPDATE cache SET ts = ?", (time.time() - 40 * 86400,)); c._db.commit()
+    c2 = _client(tmp_path)
+    assert not c2.is_cached("Hotel A")
+    c2.search("Hotel A")
+    assert c2.calls == 1
+
+
+def test_cache_separate_per_tier(tmp_path):
+    _client(tmp_path, tier="pro").search("Hotel A")
+    assert not _client(tmp_path, tier="enterprise").is_cached("Hotel A")
+    assert _client(tmp_path, tier="pro").is_cached("Hotel A")

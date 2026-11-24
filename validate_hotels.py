@@ -5,6 +5,7 @@ Runs free checks first (the hotel's website, then Overture Maps open data) and o
 those can't confirm to the paid Google Places API, after showing how many that is.
 
     python validate_hotels.py hotels.xlsx --free-only        # free passes only, see what's left
+    python validate_hotels.py hotels.xlsx                    # free passes, then Google (Pro tier) for the rest
     python validate_hotels.py hotels.xlsx --max-google 200   # Google for at most 200 hotels
     python validate_hotels.py hotels.xlsx --limit 20         # trial run on the first 20 rows
 
@@ -29,6 +30,10 @@ from hotel_validator.report import write_report
 from hotel_validator.validate import (HotelRow, Result, _query, finish, free_passes, google_pass,
                                       unresolved)
 
+# Google list prices for Text Search (New), checked Nov 2026:
+# https://developers.google.com/maps/billing-and-pricing/pricing
+FREE_PER_MONTH = {"pro": 5000, "enterprise": 1000}
+PRICE_PER_1000 = {"pro": 32, "enterprise": 35}
 FIELDS = ("name", "address", "city", "state", "zip", "phone", "url")
 
 
@@ -65,6 +70,9 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, help="only process the first N rows (for a trial run)")
     ap.add_argument("--free-only", action="store_true", help="skip the paid Google pass")
     ap.add_argument("--max-google", type=int, help="send at most N hotels to Google this run")
+    ap.add_argument("--google-tier", choices=["pro", "enterprise"], default="pro",
+                    help="pro (default): 5,000 free requests/month, no phone/website from Google. "
+                         "enterprise: adds Google's phone + website, only 1,000 free/month")
     ap.add_argument("--yes", "-y", action="store_true", help="don't ask before using Google")
     ap.add_argument("--no-overture", action="store_true", help="skip the Overture open-data pass")
     ap.add_argument("--refresh-overture", action="store_true", help="download the latest Overture release")
@@ -91,7 +99,7 @@ def main(argv=None) -> int:
     if not args.free_only:
         key = os.environ.get("GOOGLE_MAPS_API_KEY")
         if key:
-            client = PlacesClient(key, cache_path=str(cache / "places.sqlite"))
+            client = PlacesClient(key, cache_path=str(cache / "places.sqlite"), tier=args.google_tier)
         else:
             print("No GOOGLE_MAPS_API_KEY set - running free passes only.")
 
@@ -133,8 +141,12 @@ def main(argv=None) -> int:
     if remaining and client:
         send = remaining[:args.max_google] if args.max_google is not None else remaining
         uncached = sum(not client.is_cached(_query(rows[i])) for i in send)
-        print(f"\nGoogle pass: {len(send)} hotels ({uncached} not cached). Expect about {uncached}-{2 * uncached} "
-              f"billable calls; hotels not found by name use a second call.")
+        free, rate = FREE_PER_MONTH[args.google_tier], PRICE_PER_1000[args.google_tier]
+        lo, hi = (max(0, n - free) * rate / 1000 for n in (uncached, 2 * uncached))
+        print(f"\nGoogle pass ({args.google_tier} tier): {len(send)} hotels ({uncached} not cached), "
+              f"about {uncached}-{2 * uncached} requests.\n"
+              f"  {free:,} requests/month are free, then ${rate}/1,000 -> estimated ${lo:.2f}-${hi:.2f} "
+              f"(more if other Maps usage on this billing account this month).")
         go = args.yes or uncached == 0
         if not go:
             if sys.stdin.isatty():

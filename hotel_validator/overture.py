@@ -5,6 +5,7 @@ The first run downloads every US lodging place from the latest Overture release 
 """
 
 import re
+import time
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -93,9 +94,25 @@ class OvertureIndex:
         self.count = len(records)
 
     @classmethod
-    def load(cls, cache_dir: Path, refresh: bool = False) -> "OvertureIndex":
+    def load(cls, cache_dir: Path, refresh: bool = False, max_age_days: int = 45) -> "OvertureIndex":
+        """Use the local copy unless it's missing, older than max_age_days, or refresh is asked for."""
         existing = sorted(cache_dir.glob("overture_us_lodging_*.parquet"))
-        path = download(cache_dir) if refresh or not existing else existing[-1]
+        stale = existing and (time.time() - existing[-1].stat().st_mtime) > max_age_days * 86400
+        if refresh or not existing or stale:
+            if stale:
+                print(f"Local Overture data is over {max_age_days} days old - fetching the latest release.")
+            try:
+                path = download(cache_dir)
+            except Exception as e:  # offline / S3 hiccup: an older copy beats no free pass at all
+                if not existing:
+                    raise
+                print(f"WARNING: Overture download failed ({e.__class__.__name__}); using {existing[-1].name}")
+                return cls(existing[-1])
+            for old in existing:  # keep only the newest release on disk
+                if old != path:
+                    old.unlink()
+        else:
+            path = existing[-1]
         return cls(path)
 
     def candidates(self, zip_code: str, state: str, city: str) -> list[Place]:

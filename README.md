@@ -34,15 +34,27 @@ cp .env.example .env        # then paste your Google API key into .env
 4. Recommended: under *Quotas*, set a daily cap so a mistake can't run up a bill.
 
 **Cost:** each hotel that reaches the Google pass uses 1 Text Search request, or 2 when it isn't
-found by name (the second request checks what is at that address now). Because the tool asks for
-website and phone, Google bills these at its Text Search **Enterprise** rate, roughly $35 per 1,000
-requests, with a monthly free allowance. Check
-https://developers.google.com/maps/billing-and-pricing/pricing for current numbers. Google responses
-are cached in `.cache/places.sqlite`, so re-running the same rows costs nothing.
+found by name (the second request checks what is at that address now). Google list prices
+(Nov 2026, https://developers.google.com/maps/billing-and-pricing/pricing):
+
+| `--google-tier` | What Google returns | Free each month | Then |
+|---|---|---|---|
+| `pro` (default) | name, address, open/closed status, type | 5,000 requests | $32 / 1,000 |
+| `enterprise` | the above, plus Google's phone and website | 1,000 requests | $35 / 1,000 |
+
+With ~2,000 hotels, the default `pro` tier stays inside the free 5,000 even if every hotel needs two
+requests, so **a yearly run costs $0**. That assumes nothing else on the same Google billing account
+uses Text Search that month. The tool prints an estimate and asks before making any Google requests.
+`enterprise` adds Google's phone number (a small boost to match confidence) and website (for
+`suggested_url`; Overture often supplies one anyway), at roughly $35–$105 if all 2,000 hotels reach Google.
+
+Google answers are cached in `.cache/places.sqlite` for 30 days, so re-running after a crash or a fix
+costs nothing. They're never reused for next year's run.
 
 **Overture data:** the first run downloads every US lodging place from the latest Overture release
-(about 300k places, 30 MB, 1–2 minutes) into `.cache/`. Later runs reuse it. Overture publishes
-monthly; use `--refresh-overture` to get the newest release.
+(about 300k places, 30 MB, 1–2 minutes) into `.cache/`. Re-runs within 45 days reuse it. An older
+copy is replaced with the newest release automatically, so a yearly run always uses current data.
+`--refresh-overture` forces a fresh download.
 
 ## Usage
 
@@ -67,6 +79,20 @@ Columns are found automatically by header name (for example *Hotel Name / Name*,
 recognised, name it explicitly, for example `--col-name "Property"`. City is optional. Leading zeros
 that Excel drops from zip codes (`2116` → `02116`) are restored. All original columns, such as a
 database ID, are kept in the output, so results can be matched back to the database.
+
+## Yearly checklist
+
+1. Export the hotel list from the database to Excel and save it as `data/hotels_<year>.xlsx`.
+2. Update the code and dependencies:
+   `git pull && .venv/bin/pip install -r requirements.txt`
+3. Check the Google key still works and billing is on. Glance at the pricing page in case the free
+   amounts changed (update `FREE_PER_MONTH` / `PRICE_PER_1000` in `validate_hotels.py` if so).
+4. Trial run: `.venv/bin/python validate_hotels.py data/hotels_<year>.xlsx --limit 20`
+5. Free passes on everything, to see how many hotels will go to Google:
+   `.venv/bin/python validate_hotels.py data/hotels_<year>.xlsx --free-only`
+6. Full run. It shows the Google estimate and asks before spending:
+   `.venv/bin/python validate_hotels.py data/hotels_<year>.xlsx`
+7. Work through `data/hotels_<year>_validated.xlsx`. Filter on `action`; the Summary sheet has counts.
 
 ## Reading the results
 

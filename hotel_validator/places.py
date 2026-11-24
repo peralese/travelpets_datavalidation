@@ -1,7 +1,12 @@
 """Google Places API (New) Text Search client with an on-disk response cache.
 
-Re-running the same extract costs nothing for rows already looked up, because
-responses are cached by query text in a small SQLite file.
+Responses are cached in a small SQLite file so a re-run (e.g. after a crash or a fix to the
+spreadsheet) costs nothing. Cached answers expire after CACHE_MAX_AGE_DAYS, so next year's run
+always asks Google again instead of reusing stale results.
+
+Billing tier is set by the fields requested:
+  pro        - name, address, business status (closed?), types. 5,000 free requests/month.
+  enterprise - adds website and phone. Only 1,000 free requests/month.
 """
 
 import json
@@ -13,11 +18,11 @@ from dataclasses import dataclass, field
 import requests
 
 SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-FIELD_MASK = ",".join([
-    "places.id", "places.displayName", "places.formattedAddress", "places.addressComponents",
-    "places.businessStatus", "places.websiteUri", "places.nationalPhoneNumber",
-    "places.internationalPhoneNumber", "places.types", "places.googleMapsUri",
-])
+PRO_FIELDS = ["places.id", "places.displayName", "places.formattedAddress", "places.addressComponents",
+              "places.businessStatus", "places.types", "places.googleMapsUri"]
+ENTERPRISE_FIELDS = PRO_FIELDS + ["places.websiteUri", "places.nationalPhoneNumber", "places.internationalPhoneNumber"]
+FIELD_MASKS = {"pro": ",".join(PRO_FIELDS), "enterprise": ",".join(ENTERPRISE_FIELDS)}
+CACHE_MAX_AGE_DAYS = 30
 LODGING_TYPES = {"lodging", "hotel", "motel", "resort_hotel", "extended_stay_hotel", "inn", "bed_and_breakfast",
                  "guest_house", "hostel", "cottage", "campground", "rv_park", "private_guest_room",
                  "budget_japanese_inn", "farmstay", "japanese_inn"}
@@ -66,8 +71,12 @@ class Place:
 
 
 class PlacesClient:
-    def __init__(self, api_key: str, cache_path: str = ".cache/places.sqlite", timeout: int = 20):
-        self.api_key = api_key
+    def __init__(self, api_key: str, cache_path: str = ".cache/places.sqlite", timeout: int = 20,
+                 tier: str = "pro", max_age_days: float = CACHE_MAX_AGE_DAYS):
+        if tier not in FIELD_MASKS:
+            raise ValueError(f"tier must be one of {list(FIELD_MASKS)}")
+        self.api_key, self.tier = api_key, tier
+        self.min_ts = time.time() - max_age_days * 86400
         self.timeout = timeout
         self.session = requests.Session()
         self.calls = 0  # billable calls actually made this run (cache misses)
@@ -76,22 +85,23 @@ class PlacesClient:
         self._db.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, response TEXT, ts REAL)")
         self._db.commit()
 
-    @staticmethod
-    def _key(query: str, lodging_only: bool, max_results: int) -> tuple[dict, str]:
+    def _key(self, query: str, lodging_only: bool, max_results: int) -> tuple[dict, str]:
         body = {"textQuery": query, "pageSize": max_results, "regionCode": "us", "languageCode": "en"}
         if lodging_only:
             body["includedType"] = "lodging"
-        return body, json.dumps(body, sort_keys=True)
+        # tier is part of the key: a cached Pro answer has no website/phone to give an Enterprise run
+        return body, json.dumps({**body, "_tier": self.tier}, sort_keys=True)
+
+    def _cached(self, key: str):
+        with self._lock:
+            return self._db.execute("SELECT response FROM cache WHERE key = ? AND ts >= ?", (key, self.min_ts)).fetchone()
 
     def is_cached(self, query: str, lodging_only: bool = False, max_results: int = 5) -> bool:
-        _, key = self._key(query, lodging_only, max_results)
-        with self._lock:
-            return self._db.execute("SELECT 1 FROM cache WHERE key = ?", (key,)).fetchone() is not None
+        return self._cached(self._key(query, lodging_only, max_results)[1]) is not None
 
     def search(self, query: str, lodging_only: bool = False, max_results: int = 5) -> list[Place]:
         body, key = self._key(query, lodging_only, max_results)
-        with self._lock:
-            row = self._db.execute("SELECT response FROM cache WHERE key = ?", (key,)).fetchone()
+        row = self._cached(key)
         if row:
             data = json.loads(row[0])
         else:
@@ -102,7 +112,7 @@ class PlacesClient:
         return [Place.from_api(p) for p in data.get("places", [])]
 
     def _post(self, body: dict) -> dict:
-        headers = {"X-Goog-Api-Key": self.api_key, "X-Goog-FieldMask": FIELD_MASK,
+        headers = {"X-Goog-Api-Key": self.api_key, "X-Goog-FieldMask": FIELD_MASKS[self.tier],
                    "Content-Type": "application/json"}
         for attempt in range(4):
             resp = self.session.post(SEARCH_URL, json=body, headers=headers, timeout=self.timeout)
