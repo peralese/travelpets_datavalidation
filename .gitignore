@@ -1,0 +1,8 @@
+.venv/
+.env
+.cache/
+__pycache__/
+.pytest_cache/
+*_validated.xlsx
+# real extracts contain the business's data - keep them out of git
+data/

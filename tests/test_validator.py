@@ -1,0 +1,224 @@
+import pandas as pd
+import pytest
+
+from hotel_validator.columns import clean_zip, map_columns
+from hotel_validator.matching import address_match, name_score, phone_match
+from hotel_validator.places import Place
+from hotel_validator.url_check import check_url, same_site
+from hotel_validator import validate as v
+
+
+def place(name, street, zip_, status="OPERATIONAL", phone="(512) 555-0100", website="", types=("lodging", "hotel")):
+    return Place("pid", name, f"{street}, Austin, TX {zip_}, USA", street, zip_, "TX", "Austin", status, website, phone,
+                 "https://maps.google.com/?cid=1", list(types))
+
+
+class FakeClient:
+    def __init__(self, by_name=(), at_address=()):
+        self.by_name, self.at_address, self.calls = list(by_name), list(at_address), 0
+
+    def search(self, query, lodging_only=False, max_results=5):
+        self.calls += 1
+        return self.at_address if lodging_only else self.by_name
+
+
+class FakeOverture:
+    def __init__(self, places, confidence=0.9):
+        self.places, self.confidence = places, {p.place_id: confidence for p in places}
+
+    def candidates(self, zip_code, state, city):
+        return self.places
+
+
+class FakeResp:
+    def __init__(self, code=200, text="", url="https://example.com/"):
+        self.status_code, self.text, self.url = code, text, url
+
+
+class FakeSession:
+    def __init__(self, resp=None, exc=None):
+        self.resp, self.exc = resp, exc
+
+    def get(self, url, **kw):
+        if self.exc:
+            raise self.exc
+        return self.resp
+
+
+ROW = v.HotelRow("Hampton Inn & Suites Austin Downtown", "200 San Jacinto Blvd", "Austin", "TX", "78701",
+                 "512-555-0100", "")
+
+
+# --- matching -------------------------------------------------------------
+def test_name_score_tolerates_suffixes():
+    assert name_score("Hampton Inn & Suites Austin Downtown",
+                      "Hampton Inn & Suites Austin-Downtown/Convention Center") >= 80
+    assert name_score("Hampton Inn Austin", "Motel 6 Austin", ignore="Austin TX") < 60
+    # rebrands sharing location words must not look like the same hotel
+    assert name_score("Hampton Inn & Suites Austin Downtown", "Holiday Inn Express Austin Downtown", "Austin") < 60
+    assert name_score("La Quinta Inn Austin Airport", "Wyndham Garden Austin Airport", "Austin") < 60
+    assert name_score("Example Lodge", "Example Domain") < 60
+    assert name_score("Kimpton Hotel Van Zandt", "Hotel Van Zandt") >= 80
+    assert name_score("The Driskil", "The Driskill Hotel") >= 80  # typo tolerance
+    assert name_score("Navasota Inn", "Days Inn by Wyndham Navasota", "Navasota TX") < 80
+    assert name_score("Navasota Inn", "Navasota Inn", "Navasota TX") == 100
+    assert name_score("Courtyard by Marriott Irvine Spectrum", "Marriott", "Irvine CA") < 80
+    assert name_score("Big Iron Motel", "Riggins Motel", "Riggins ID") < 60
+    assert name_score("Red Roof Inn Austin North", "Red Roof PLUS+ Austin North", "Austin") >= 80
+    assert name_score("Austin Marriott South", "Marriott Austin South", "Austin") == 100
+    assert name_score("The Westin Austin Downtown", "Westin Austin Downtown Hotel", ignore="Austin") >= 90
+
+
+def test_address_match_abbreviations():
+    assert address_match("200 San Jacinto Boulevard, Austin", "78701", "200 San Jacinto Blvd", "78701")[0] == "MATCH"
+    assert address_match("200 San Jacinto Blvd", "78701", "1900 Elm St", "75201")[0] == "MISMATCH"
+
+
+def test_phone_and_zip():
+    assert phone_match("1 (512) 555-0100", "512.555.0100") == "MATCH"
+    assert phone_match("", "512") == "NO_PHONE"
+    assert clean_zip("2134") == "02134" and clean_zip(2134.0) == "02134"
+
+
+def test_column_detection():
+    df = pd.DataFrame(columns=["Hotel Name", "Street Address", "State", "Zip Code", "Phone Number", "Website"])
+    m = map_columns(df)
+    assert m == {"name": "Hotel Name", "address": "Street Address", "state": "State", "zip": "Zip Code",
+                 "phone": "Phone Number", "url": "Website"}
+    with pytest.raises(ValueError):
+        map_columns(pd.DataFrame(columns=["foo"]))
+
+
+# --- hotel decisions ------------------------------------------------------
+def test_verified():
+    c = FakeClient([place("Hampton Inn & Suites Austin-Downtown/Convention Center", "200 San Jacinto Blvd", "78701")])
+    r = v.find_hotel(ROW, c)
+    assert (r.hotel_status, r.confidence) == ("VERIFIED", "HIGH")
+
+
+def test_permanently_closed():
+    c = FakeClient([place("Hampton Inn & Suites Austin Downtown", "200 San Jacinto Blvd", "78701",
+                          status="CLOSED_PERMANENTLY")])
+    assert v.find_hotel(ROW, c).hotel_status == "CLOSED_PERMANENTLY"
+
+
+def test_rebrand_detected():
+    c = FakeClient(by_name=[place("Starbucks", "500 Congress Ave", "78701", types=("cafe",))],
+                   at_address=[place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701")])
+    r = v.find_hotel(ROW, c)
+    assert r.hotel_status == "NAME_CHANGED" and "Holiday Inn" in r.match_name
+
+
+def test_rebrand_with_shared_location_words():
+    c = FakeClient(by_name=[place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701")],
+                   at_address=[place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701")])
+    assert v.find_hotel(ROW, c).hotel_status == "NAME_CHANGED"
+
+
+def test_moved():
+    c = FakeClient([place("Hampton Inn & Suites Austin Downtown", "1700 Elm Rd", "78745", phone="512-555-0100")])
+    assert v.find_hotel(ROW, c).hotel_status == "ADDRESS_MISMATCH"
+
+
+def test_not_found():
+    assert v.find_hotel(ROW, FakeClient()).hotel_status == "NOT_FOUND"
+
+
+def test_missing_url_gets_google_suggestion():
+    c = FakeClient([place("Hampton Inn & Suites Austin Downtown", "200 San Jacinto Blvd", "78701",
+                          website="https://www.hilton.com/en/hotels/ausdthx-hampton/")])
+    r = v.validate_row(ROW, FakeSession(), client=c)
+    assert r.url_status == "MISSING" and r.suggested_url.startswith("https://www.hilton.com")
+    assert "Add URL" in r.action
+
+
+# --- URL checks -----------------------------------------------------------
+def test_url_ok():
+    s = FakeSession(FakeResp(200, "<title>Hampton Inn &amp; Suites Austin Downtown | Hilton</title>"))
+    assert check_url("example.com", ROW.name, s).status == "OK"
+
+
+def test_url_broken_parked_blocked_unreachable():
+    import requests
+    assert check_url("example.com", ROW.name, FakeSession(FakeResp(404))).status == "BROKEN"
+    assert check_url("example.com", ROW.name, FakeSession(FakeResp(403))).status == "BLOCKED"
+    parked = FakeResp(200, "<title>hamptonaustin.com</title> This domain is for sale!")
+    assert check_url("hamptonaustin.com", ROW.name, FakeSession(parked)).status == "PARKED"
+    dns = requests.exceptions.ConnectionError("NameResolutionError")
+    r = check_url("nope.example", ROW.name, FakeSession(exc=dns))
+    assert r.status == "UNREACHABLE" and "DNS" in r.notes
+
+
+def test_url_content_mismatch_and_redirect():
+    other = FakeResp(200, "<title>Joe's Pizza</title>", "https://example.com/")
+    assert check_url("example.com", ROW.name, FakeSession(other)).status == "CONTENT_MISMATCH"
+    generic = FakeResp(200, "<title>Example Domain</title><p>This domain is for use in examples.</p>")
+    assert check_url("example.com", "Example Lodge", FakeSession(generic)).status == "CONTENT_MISMATCH"
+    footer = FakeResp(200, "<title>Hotel Van Zandt | Austin</title><footer>A Kimpton hotel</footer>",
+                    "https://www.hotelvanzandt.com/")
+    assert check_url("hotelvanzandt.com", "Kimpton Hotel Van Zandt", FakeSession(footer)).status == "OK"
+    moved = FakeResp(200, f"<title>{ROW.name}</title>", "https://newsite.com/")
+    assert check_url("oldsite.com", ROW.name, FakeSession(moved)).status == "REDIRECTED"
+
+
+def test_same_site_brand_paths():
+    assert same_site("https://hilton.com/en/hotels/ausdthx-hampton/", "https://www.hilton.com/en/hotels/ausdthx-hampton/x")
+    assert not same_site("https://hilton.com/en/hotels/ausdthx-hampton/", "https://www.hilton.com/en/hotels/dalxyz/")
+    assert same_site("http://www.myinn.com/rooms", "https://myinn.com/")
+
+
+# --- multi-pass pipeline -------------------------------------------------
+HOTEL_PAGE = f"<title>{ROW.name}</title><p>200 San Jacinto Boulevard, Austin TX</p><a href='tel:5125550100'>call</a>"
+
+
+def test_website_pass_confirms_without_google():
+    row = v.HotelRow(**{**ROW.__dict__, "url": "hamptonaustin.com"})
+    c = FakeClient([place(ROW.name, "200 San Jacinto Blvd", "78701")])
+    r = v.validate_row(row, FakeSession(FakeResp(200, HOTEL_PAGE, "https://hamptonaustin.com/")), client=c)
+    assert (r.hotel_status, r.verified_by, r.confidence) == ("VERIFIED", "website", "HIGH")
+    assert c.calls == 0 and r.url_shows_address == "YES"
+
+
+def test_website_without_address_or_phone_is_not_enough():
+    row = v.HotelRow(**{**ROW.__dict__, "url": "hamptonaustin.com"})
+    page = FakeResp(200, f"<title>{ROW.name}</title><p>Book now!</p>", "https://hamptonaustin.com/")
+    r = v.validate_row(row, FakeSession(page))
+    assert r.hotel_status == "UNRESOLVED" and r.url_status == "OK" and r.url_shows_address == "NO"
+
+
+def test_overture_pass_confirms_without_google():
+    c = FakeClient()
+    o = FakeOverture([place("Hampton Inn & Suites Austin-Downtown", "200 San Jacinto Blvd", "78701",
+                            website="https://www.hilton.com/en/hotels/ausdthx/")])
+    r = v.validate_row(ROW, FakeSession(), overture=o, client=c)
+    assert (r.hotel_status, r.verified_by, r.confidence) == ("VERIFIED", "overture", "HIGH")
+    assert c.calls == 0 and r.suggested_url.startswith("https://www.hilton.com")
+
+
+def test_overture_never_condemns_goes_to_google():
+    """Closed, low-confidence or different-name Overture records must fall through to Google."""
+    for o in (FakeOverture([place(ROW.name, "200 San Jacinto Blvd", "78701", status="CLOSED_PERMANENTLY")]),
+              FakeOverture([place(ROW.name, "200 San Jacinto Blvd", "78701")], confidence=0.3),
+              FakeOverture([place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701")])):
+        c = FakeClient([place(ROW.name, "200 San Jacinto Blvd", "78701")])
+        r = v.validate_row(ROW, FakeSession(), overture=o, client=c)
+        assert r.verified_by == "google" and c.calls >= 1
+
+
+def test_overture_ambiguous_address_goes_to_google():
+    o = FakeOverture([place(ROW.name, "200 San Jacinto Blvd", "78701"),
+                      place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701")])
+    assert v.overture_confirm(ROW, o) is None
+
+
+def test_no_google_leaves_unresolved():
+    r = v.validate_row(ROW, FakeSession(), overture=FakeOverture([]))
+    assert r.hotel_status == "UNRESOLVED" and "Google" in r.action
+
+
+def test_overture_website_filter():
+    from hotel_validator.overture import _own_site
+    assert _own_site("https://www.loewshotels.com/boston-hotel")
+    assert _own_site("https://www.hotelx.com/")
+    assert not _own_site("https://www.hotels.com/ho123") and not _own_site("https://linktr.ee/thedriskill")
+    assert not _own_site("https://m.facebook.com/somehotel")
