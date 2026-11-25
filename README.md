@@ -115,6 +115,7 @@ database ID, are kept in the output, so results can be matched back to the datab
 | `PARKED` | Domain expired or for sale |
 | `BROKEN` / `UNREACHABLE` / `INVALID` | 404 or 5xx error / DNS failure or timeout / malformed URL |
 | `BLOCKED` | The site refused automated access (common on big brand sites). Check by hand |
+| `ERROR` | The check itself failed unexpectedly (see `url_notes`). Re-run |
 
 Other useful columns:
 - `verified_by`: which pass confirmed the hotel (`website`, `overture` or `google`).

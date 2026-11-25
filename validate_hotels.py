@@ -27,6 +27,7 @@ from hotel_validator.columns import clean, clean_zip, map_columns
 from hotel_validator.overture import OvertureIndex
 from hotel_validator.places import PlacesAuthError, PlacesClient
 from hotel_validator.report import write_report
+from hotel_validator.url_check import UrlResult
 from hotel_validator.validate import (HotelRow, Result, _query, finish, free_passes, google_pass,
                                       unresolved)
 
@@ -46,8 +47,12 @@ def load_env(path: Path) -> None:
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def run_parallel(fn, items, workers, label):
-    """Run fn(item) over items in a thread pool, printing progress. Returns {item: result}."""
+def run_parallel(fn, items, workers, label, on_error):
+    """Run fn(item) over items in a thread pool, printing progress. Returns {item: result}.
+
+    An unexpected error on one row becomes on_error(exc) for that row instead of ending the run;
+    only a rejected Google key stops everything.
+    """
     out, start = {}, time.time()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fn, it): it for it in items}
@@ -57,6 +62,8 @@ def run_parallel(fn, items, workers, label):
             except PlacesAuthError:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
+            except Exception as e:
+                out[futures[fut]] = on_error(e)
             if n % 25 == 0 or n == len(items):
                 print(f"  {label}: {n}/{len(items)} rows ({time.time() - start:.0f}s)", flush=True)
     return out
@@ -130,7 +137,9 @@ def main(argv=None) -> int:
 
     # Passes 1 + 2: free.
     print("\nFree passes (hotel website, Overture open data)...")
-    for i, (res, u) in run_parallel(lambda i: free_passes(rows[i], session(), overture), todo, args.workers, "free").items():
+    free_error = lambda e: (None, UrlResult("ERROR", notes=f"Check failed: {e.__class__.__name__}: {e}"[:300]))
+    for i, (res, u) in run_parallel(lambda i: free_passes(rows[i], session(), overture), todo, args.workers,
+                                    "free", free_error).items():
         results[i], url_checks[i] = res, u
     remaining = [i for i in todo if results[i] is None]
     by = pd.Series([results[i].verified_by for i in todo if results[i]]).value_counts()
@@ -155,7 +164,9 @@ def main(argv=None) -> int:
                 print("Not interactive - pass --yes to use Google.")
         if go:
             try:
-                for i, res in run_parallel(lambda i: google_pass(rows[i], client), send, args.workers, "google").items():
+                google_error = lambda e: Result(hotel_status="ERROR", match_notes=f"{e.__class__.__name__}: {e}"[:300])
+                for i, res in run_parallel(lambda i: google_pass(rows[i], client), send, args.workers,
+                                           "google", google_error).items():
                     results[i] = res
             except PlacesAuthError as e:
                 print(f"\nERROR: {e}\nSee README 'Google API key setup'.", file=sys.stderr)

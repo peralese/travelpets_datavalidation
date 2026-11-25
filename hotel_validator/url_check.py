@@ -21,6 +21,9 @@ PARKED_MARKERS = [
     "parked free", "domain parking", "this domain has expired", "sedoparking", "hugedomains",
     "dan.com", "afternic", "godaddy.com/domains", "the domain name", "parkingcrew",
 ]
+# An expired domain that redirects here is for sale, whatever the page itself returns.
+DOMAIN_SALE_HOSTS = {"hugedomains.com", "atom.com", "dan.com", "afternic.com", "sedo.com", "buydomains.com",
+                     "undeveloped.com", "bodis.com", "parkingcrew.net", "sedoparking.com"}
 # Hotel brand sites serve one hotel per sub-path; domain matching on these is meaningless alone.
 SHARED_HOSTS = {"hilton.com", "marriott.com", "ihg.com", "hyatt.com", "wyndhamhotels.com", "choicehotels.com",
                 "bestwestern.com", "radissonhotels.com", "redlion.com", "laquinta.com", "motel6.com",
@@ -116,6 +119,10 @@ def check_url(url: str, hotel_name: str, session: requests.Session | None = None
 
     code, final = resp.status_code, resp.url
     notes = [err] if err else []
+    if registrable_domain(final) in DOMAIN_SALE_HOSTS:
+        # checked first: these marketplaces often answer scripts with 403, which would look BLOCKED
+        return UrlResult("PARKED", str(code), final,
+                         "; ".join(notes + [f"Redirects to domain marketplace {registrable_domain(final)}"]))
     if code in (401, 403, 429, 503) or "cf-chl" in resp.text[:5000]:
         # Many hotel / brand sites block scripts (Cloudflare, Akamai) - not proof the site is down.
         return UrlResult("BLOCKED", str(code), final, "; ".join(notes + ["Site blocked automated check - verify manually"]))

@@ -9,10 +9,10 @@ ALIASES = {
     "name": ["hotel name", "hotel", "name", "property", "property name", "hotelname"],
     "address": ["address", "street", "street address", "address1", "address 1", "addr"],
     "city": ["city", "town"],
-    "state": ["state", "st", "province", "state code"],
+    "state": ["state", "st", "province", "state code", "id_region", "region"],
     "zip": ["zip", "zip code", "zipcode", "postal code", "postal", "postcode", "zip_code"],
     "phone": ["phone", "phone number", "telephone", "tel", "phone_number"],
-    "url": ["url", "website", "web site", "web", "site", "website url", "web address"],
+    "url": ["url", "website", "web site", "web", "site", "website url", "web address", "webaddress"],
 }
 REQUIRED = ["name", "address", "state"]
 

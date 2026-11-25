@@ -269,6 +269,7 @@ def _action(r: Result) -> str:
         "BROKEN": "Fix URL", "UNREACHABLE": "Fix URL", "PARKED": "Replace URL (domain parked)",
         "INVALID": "Fix URL", "REDIRECTED": "Update URL to final destination",
         "CONTENT_MISMATCH": "Check URL - page doesn't mention hotel", "BLOCKED": "Check URL manually",
+        "ERROR": "Re-run - URL check failed",
     }.get(r.url_status, "")
     if url_action and r.suggested_url and r.url_status != "MISSING":
         url_action += " (see suggested_url)"

@@ -248,3 +248,33 @@ def test_cache_separate_per_tier(tmp_path):
     _client(tmp_path, tier="pro").search("Hotel A")
     assert not _client(tmp_path, tier="enterprise").is_cached("Hotel A")
     assert _client(tmp_path, tier="pro").is_cached("Hotel A")
+
+
+def test_travelpets_export_headers():
+    df = pd.DataFrame(columns=["id_hotel", "hotelName", "address", "postal", "phone", "city", "id_country",
+                               "id_region", "webAddress"])
+    assert map_columns(df) == {"name": "hotelName", "address": "address", "state": "id_region", "zip": "postal",
+                               "phone": "phone", "city": "city", "url": "webAddress"}
+
+
+def test_report_strips_characters_excel_rejects(tmp_path):
+    from hotel_validator.report import write_report
+    row = {**v.Result(hotel_status="VERIFIED", url_status="OK", url_notes="title \x1b\x00 here").as_dict()}
+    path = tmp_path / "out.xlsx"
+    write_report(pd.DataFrame([row]), str(path), 0)
+    assert pd.read_excel(path, sheet_name="Results")["url_notes"][0] == "title  here"
+
+
+def test_one_bad_row_does_not_stop_the_run():
+    from validate_hotels import run_parallel
+
+    def fn(i):
+        if i == 2:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "bad")
+        return i * 10
+    assert run_parallel(fn, [1, 2, 3], 2, "t", on_error=lambda e: "failed") == {1: 10, 2: "failed", 3: 30}
+
+
+def test_redirect_to_domain_marketplace_is_parked_not_blocked():
+    sold = FakeResp(403, "", url="https://www.hugedomains.com/domain_profile.cfm?d=oldhotel.com")
+    assert check_url("oldhotel.com", ROW.name, FakeSession(sold)).status == "PARKED"

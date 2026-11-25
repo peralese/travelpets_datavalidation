@@ -1,6 +1,7 @@
 """Write the results workbook: original columns + validation columns, colour-coded, with a summary sheet."""
 
 import pandas as pd
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -9,11 +10,17 @@ FILLS = {
     "NAME_CHANGED": "FFEB9C", "ADDRESS_MISMATCH": "FFEB9C", "CLOSED_TEMPORARILY": "FFEB9C",
     "REDIRECTED": "FFEB9C", "CONTENT_MISMATCH": "FFEB9C", "BLOCKED": "FFEB9C", "MISSING": "FFEB9C",
     "CLOSED_PERMANENTLY": "FFC7CE", "NOT_FOUND": "FFC7CE", "BROKEN": "FFC7CE", "UNREACHABLE": "FFC7CE",
-    "PARKED": "FFC7CE", "INVALID": "FFC7CE", "ERROR": "D9D9D9", "UNRESOLVED": "D9D9D9",
+    "PARKED": "FFC7CE", "INVALID": "FFC7CE", "ERROR": "D9D9D9", "UNRESOLVED": "D9D9D9",  # ERROR: hotel or URL
 }
 
 
+def _excel_safe(value):
+    """Strip control characters (e.g. from scraped page titles) that openpyxl refuses to write."""
+    return ILLEGAL_CHARACTERS_RE.sub("", value) if isinstance(value, str) else value
+
+
 def write_report(df: pd.DataFrame, path: str, places_calls: int) -> None:
+    df = df.map(_excel_safe)
     summary = pd.concat([
         df["hotel_status"].value_counts().rename_axis("value").reset_index(name="count").assign(check="Hotel"),
         df["verified_by"].replace("", "(none)").value_counts().rename_axis("value").reset_index(name="count")
