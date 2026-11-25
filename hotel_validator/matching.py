@@ -34,11 +34,16 @@ def name_score(ours: str, theirs: str, ignore: str = "") -> int:
     if not ours or not theirs:
         return 0
     a, b = core_words(ours, ignore), core_words(theirs, ignore)
-    if not a or not b:
-        # Name is just "<city> Inn" etc. Keep the city words, since they're all there is to compare.
+    if bool(a) != bool(b):
+        # One name is just "<city> Inn" and the other has real words ("Florence Villager Lodge" vs
+        # "Florence Inn and Suites"): the city is all they share, which isn't evidence of the same hotel.
+        return min(50, int(round(fuzz.token_set_ratio(core_words(ours), core_words(theirs)))))
+    if not a:
+        # Both names are just "<city> Inn" etc. Keep the city words, since they're all there is to compare.
         a, b = core_words(ours), core_words(theirs)
         if not a or not b:
             return int(round(fuzz.ratio(ours.lower(), theirs.lower())))
+    a, b = _join_split_words(a, b), _join_split_words(b, a)
     short, long_ = sorted((a, b), key=lambda x: len(x.split()))
     # token_set_ratio alone scores >=70 whenever two names share one word ("Example Lodge" vs
     # "Example Domain"), so also require that the shorter name's words are found in the longer
@@ -46,6 +51,28 @@ def name_score(ours: str, theirs: str, ignore: str = "") -> int:
     return int(round(min(fuzz.token_set_ratio(a, b),
                          100 * token_coverage(short, long_),
                          50 + 50 * token_coverage(long_, short))))
+
+
+def same_brand(ours: str, theirs: str, ignore: str = "") -> bool:
+    """Both names start with the same brand words, e.g. "La Quinta Inn Orange County" and
+    "La Quinta Inn & Suites by Wyndham Irvine Spectrum". Only meaningful at the same address."""
+    a, b = core_words(ours, ignore).split(), core_words(theirs, ignore).split()
+    k = min(2, len(a), len(b))
+    return k >= 1 and a[:k] == b[:k] and len("".join(a[:k])) >= 4
+
+
+def _join_split_words(text: str, other: str) -> str:
+    """Join adjacent words that the other name writes as one ("old town" vs "Oldtown")."""
+    words, joined = text.split(), set(other.split())
+    out, i = [], 0
+    while i < len(words):
+        if i + 1 < len(words) and words[i] + words[i + 1] in joined:
+            out.append(words[i] + words[i + 1])
+            i += 2
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
 
 
 def token_coverage(needle: str, haystack: str) -> float:

@@ -352,3 +352,48 @@ def test_plural_names_match():
     assert name_score("Adirondack Efficiency Hotel", "Adirondack Efficiencies") >= 80
     assert name_score("Lakeside Cottages", "Lakeside Cottage") >= 80
     assert name_score("Hampton Inn Austin", "Motel 6 Austin") < 60
+
+
+def test_words_written_together_or_apart_match():
+    assert name_score("Vagabond Executive Sac Oldtown", "Vagabond Inn Executive - Sacramento (Old Town)",
+                      "Sacramento CA") >= 80
+    assert name_score("Sea Side Inn", "Seaside Inn Motel") >= 80
+    assert name_score("Comfort Inn", "Econo Lodge Inn & Suites El Paso West", "El Paso TX") < 60
+
+
+# --- Google decisions found in the first real batch -------------------------
+def test_other_branch_of_chain_is_not_the_hotel():
+    c = FakeClient([place("Hampton Inn & Suites Austin Downtown", "1700 Elm Rd", "78745", phone="")])
+    r = v.find_hotel(ROW, c)
+    assert r.hotel_status == "NOT_FOUND" and "different branch" in r.match_notes
+
+
+def test_results_in_another_state_are_ignored():
+    canada = place(ROW.name, "8054 Lundy's Ln", "L2H 1H1")
+    canada.state = "ON"
+    assert v.find_hotel(ROW, FakeClient([canada])).match_name == ""
+
+
+def test_same_brand_at_same_address_is_verified():
+    row = v.HotelRow("La Quinta Inn Orange County", "14972 Sand Canyon Avenue", "Irvine", "CA", "92618", "", "")
+    p = place("La Quinta Inn & Suites by Wyndham Irvine Spectrum", "14972 Sand Canyon Ave", "92618")
+    p.state = "CA"
+    r = v.find_hotel(row, FakeClient([p]))
+    assert r.hotel_status == "VERIFIED" and "Name differs" in r.match_notes
+
+
+def test_similar_name_near_address_closed_is_reported_closed():
+    row = v.HotelRow("Quality Inn", "I-95 Exit 77 / 6014 Jim Bilton Road", "St. George", "TX", "78701", "", "")
+    p = place("Quality Inn St George I-95", "6014 W Jim Bilton Blvd", "78701", status="CLOSED_PERMANENTLY")
+    assert v.find_hotel(row, FakeClient([p])).hotel_status == "CLOSED_PERMANENTLY"
+
+
+def test_lodging_at_address_from_first_search_saves_a_request():
+    c = FakeClient(by_name=[place("Ramada by Wyndham Austin", "200 San Jacinto Blvd", "78701")])
+    r = v.find_hotel(ROW, c)
+    assert r.hotel_status == "NAME_CHANGED" and c.calls == 1
+
+
+def test_sharing_only_the_city_name_is_not_a_match():
+    assert name_score("Florence Villager Lodge", "Florence Inn and Suites", "Florence SC") < 60
+    assert name_score("Lake Placid Inn", "Lake Placid Hotel", "Lake Placid NY") >= 80

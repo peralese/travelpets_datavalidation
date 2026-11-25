@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 
 import requests
 
-from .matching import address_match, name_score, phone_match
+from .matching import address_match, name_score, phone_match, same_brand
 from .places import Place, PlacesClient, PlacesError
 from .url_check import UrlResult, check_url, normalize_url, same_site
 
@@ -167,42 +167,30 @@ def _is_hotel_record(p: Place, index) -> bool:
 
 
 # --- pass 3: Google -----------------------------------------------------------
+def _same_state(row: HotelRow, p: Place) -> bool:
+    return not (row.state and p.state) or row.state.strip().upper() == p.state.strip().upper()
+
+
+def _same_hotel(row: HotelRow, s: dict) -> bool:
+    """Google's place is this hotel: at (or right by) the listed address, under a similar name.
+
+    A matching name somewhere else isn't enough - chains have several branches per city, and
+    hotels almost never move. Those cases become NOT_FOUND with the other branch in the notes.
+    """
+    if s["addr"] == "MATCH":
+        return s["name"] >= NAME_WEAK or same_brand(row.name, s["place"].name, f"{row.city} {row.state}")
+    return s["addr"] == "PARTIAL" and s["name"] >= NAME_WEAK
+
+
 def find_hotel(row: HotelRow, client: PlacesClient) -> Result:
-    candidates = [_score(row, p) for p in client.search(_query(row))]
-    best = max(candidates, key=_rank, default=None)
+    candidates = [s for s in (_score(row, p) for p in client.search(_query(row))) if _same_state(row, s["place"])]
     res = Result(verified_by="google")
 
-    same_hotel = best and (
-        best["name"] >= NAME_OK
-        or (best["name"] >= NAME_WEAK and (best["addr"] == "MATCH" or best["phone"] == "MATCH"))
-    )  # a phone match alone isn't enough: rebranded hotels usually keep their phone line
-
-    if not same_hotel:
-        # Not found by name - see what lodging (if any) Google lists at the address now.
-        at_address = [_score(row, p) for p in client.search(_query(row, with_name=False), lodging_only=True)]
-        at_address = [s for s in at_address if s["addr"] == "MATCH" and s["place"].is_lodging]
-        if at_address:
-            other = max(at_address, key=lambda s: (s["phone"] == "MATCH", s["name"]))
-            _fill(res, other)
-            res.hotel_status = NAME_CHANGED
-            res.confidence = "MEDIUM" if other["phone"] == "MATCH" else "LOW"
-            res.match_notes = f"Address now listed as '{other['place'].name}' - possible rebrand or new owner"
-            return _closed_override(res, other["place"])
-        if best:
-            _fill(res, best)  # show nearest candidate to help manual review
-        res.hotel_status = NOT_FOUND
-        res.confidence = "MEDIUM" if not candidates else "LOW"
-        res.match_notes = ("Google returned no results" if not candidates
-                           else f"Closest Google result '{best['place'].name}' does not match")
-        return res
-
-    _fill(res, best)
-    p = best["place"]
-    if best["addr"] == "MISMATCH":
-        res.hotel_status = ADDRESS_MISMATCH
-        res.confidence = "MEDIUM" if best["phone"] == "MATCH" else "LOW"
-        res.match_notes = f"Hotel found at a different address: {p.address}"
-    else:
+    same = [s for s in candidates if _same_hotel(row, s)]
+    if same:
+        best = max(same, key=_rank)
+        _fill(res, best)
+        p = best["place"]
         res.hotel_status = VERIFIED
         strong = best["name"] >= NAME_OK and best["addr"] == "MATCH"
         res.confidence = "HIGH" if strong and best["phone"] != "MISMATCH" else "MEDIUM"
@@ -214,7 +202,45 @@ def find_hotel(row: HotelRow, client: PlacesClient) -> Result:
         if best["name"] < NAME_OK:
             notes.append(f"Name differs - Google: '{p.name}'")
         res.match_notes = "; ".join(notes)
-    return _closed_override(res, p)
+        return _closed_override(res, p)
+
+    # Same name and same phone at another address: the hotel really moved (or our address is wrong).
+    # Only possible on the enterprise tier, which returns phone numbers.
+    moved = [s for s in candidates if s["name"] >= NAME_OK and s["addr"] == "MISMATCH" and s["phone"] == "MATCH"]
+    if moved:
+        best = max(moved, key=_rank)
+        _fill(res, best)
+        res.hotel_status, res.confidence = ADDRESS_MISMATCH, "MEDIUM"
+        res.match_notes = f"Hotel found at a different address: {best['place'].address}"
+        return _closed_override(res, best["place"])
+
+    # Not found by name: see what lodging (if any) Google lists at the address now. The first
+    # search often already returned it, which saves a second request.
+    at_address = [s for s in candidates if s["addr"] == "MATCH" and s["place"].is_lodging]
+    if not at_address:
+        at_address = [s for s in (_score(row, p) for p in client.search(_query(row, with_name=False), lodging_only=True))
+                      if s["addr"] == "MATCH" and s["place"].is_lodging and _same_state(row, s["place"])]
+    if at_address:
+        other = max(at_address, key=lambda s: (s["phone"] == "MATCH", s["name"]))
+        _fill(res, other)
+        res.hotel_status = NAME_CHANGED
+        res.confidence = "MEDIUM" if other["phone"] == "MATCH" else "LOW"
+        res.match_notes = f"Address now listed as '{other['place'].name}' - possible rebrand or new owner"
+        return _closed_override(res, other["place"])
+
+    best = max(candidates, key=_rank, default=None)
+    if best:
+        _fill(res, best)  # show nearest candidate to help manual review
+    res.hotel_status = NOT_FOUND
+    res.confidence = "MEDIUM" if not candidates else "LOW"
+    if not candidates:
+        res.match_notes = "Google returned no results"
+    elif best["name"] >= NAME_OK:
+        res.match_notes = (f"Nothing at the listed address. Google has '{best['place'].name}' at "
+                           f"{best['place'].address} - a different branch, or the listed address is wrong")
+    else:
+        res.match_notes = f"Closest Google result '{best['place'].name}' does not match"
+    return res
 
 
 def _closed_override(res: Result, p: Place) -> Result:

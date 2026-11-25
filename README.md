@@ -101,9 +101,9 @@ database ID, are kept in the output, so results can be matched back to the datab
 |---|---|
 | `VERIFIED` | Google lists this hotel at this address and it's operating. `confidence` = HIGH/MEDIUM |
 | `NAME_CHANGED` | A *different* lodging is now at this address (rebrand or sale). Pet policy may have changed |
-| `ADDRESS_MISMATCH` | The hotel exists, but Google has a different address (moved, or the data is wrong) |
+| `ADDRESS_MISMATCH` | Same name and phone at a different address: moved, or the data is wrong. Needs `--google-tier enterprise` (the default tier has no phone numbers) |
 | `CLOSED_TEMPORARILY` / `CLOSED_PERMANENTLY` | As marked by Google |
-| `NOT_FOUND` | Nothing matching was found. Usually closed; review before removing |
+| `NOT_FOUND` | Nothing matching was found at the address. Usually closed; review before removing. If Google has a same-named hotel elsewhere, `match_notes` names it (often another branch of the chain, sometimes a wrong address on file) |
 | `UNRESOLVED` | Free passes couldn't confirm it and Google wasn't used (or `--max-google` was reached) |
 | `ERROR` | Lookup failed or the row is missing its name/address. Re-run |
 
