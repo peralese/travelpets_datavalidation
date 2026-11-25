@@ -4,6 +4,8 @@ Rows go through up to three passes, stopping as soon as one confirms the hotel:
 
   1. website  (free)  - the hotel's own page loads, names the hotel and shows its address or phone
   2. overture (free)  - Overture Maps open data has an open lodging with the same name and address
+  2b. overture_website (free) - the hotel's website as listed in Overture (when it differs from the
+                       one on file) names the hotel and shows its address or phone
   3. google   (paid)  - Google Places lookup, which also detects closures, moves and rebrands
 
 The free passes can only *confirm* a hotel. Anything that looks closed, moved or renamed is left
@@ -17,7 +19,7 @@ import requests
 
 from .matching import address_match, name_score, phone_match
 from .places import Place, PlacesClient, PlacesError
-from .url_check import UrlResult, check_url, same_site
+from .url_check import UrlResult, check_url, normalize_url, same_site
 
 NAME_OK = 80        # name similarity that counts as "same hotel"
 NAME_WEAK = 60      # acceptable only when address or phone also agree
@@ -48,9 +50,10 @@ class HotelRow:
 @dataclass
 class Result:
     hotel_status: str = ""
-    verified_by: str = ""         # website / overture / google
+    verified_by: str = ""         # website / overture / overture_website / google
     confidence: str = ""          # HIGH / MEDIUM / LOW
     match_notes: str = ""
+    overture_hint: str = ""       # free warning for unconfirmed hotels (possible rebrand / closure); never a verdict
     match_name: str = ""          # what the reference source (Overture or Google) calls the place
     match_address: str = ""
     match_phone: str = ""
@@ -102,10 +105,7 @@ def overture_confirm(row: HotelRow, index) -> Result | None:
             and index.confidence.get(s["place"].place_id, 0) >= OVERTURE_MIN_CONFIDENCE]
     if not good:
         return None
-    # Overture often keeps a rebranded hotel's old record next to the new one. If another lodging
-    # with a different name shares this address, it's ambiguous - let Google decide.
-    rivals = [s for s in scored if s["addr"] == "MATCH" and s["name"] < NAME_WEAK and _is_hotel_record(s["place"], index)]
-    if rivals:
+    if _has_rival(scored, index):
         return None
     best = max(good, key=_rank)
     res = Result(hotel_status=VERIFIED, verified_by="overture",
@@ -117,6 +117,47 @@ def overture_confirm(row: HotelRow, index) -> Result | None:
 HOTEL_CATEGORIES = {"hotel", "motel", "inn", "resort"}
 COMPANY_NAME = re.compile(r"\b(llc|inc|corp|corporation|associates|partners|hospitality|owner|development|"
                           r"management|holdings|properties|investments?|group|ltd|lp)\b", re.I)
+
+
+def _has_rival(scored: list[dict], index) -> bool:
+    """Overture often keeps a rebranded hotel's old record next to the new one. If another lodging
+    with a different name shares this address, it's ambiguous - let Google decide."""
+    return any(s["addr"] == "MATCH" and s["name"] < NAME_WEAK and _is_hotel_record(s["place"], index) for s in scored)
+
+
+# --- pass 2b: the website Overture has for this hotel ---------------------------
+MAX_OVERTURE_SITES = 2
+
+
+def overture_website_confirm(row: HotelRow, index, session: requests.Session, checked: UrlResult) -> tuple[Result | None, str]:
+    """Check the website(s) Overture lists for this hotel, when they differ from the one on file.
+
+    Returns (VERIFIED result or None, a working site that names the hotel, for suggested_url).
+    Same bar as pass 1: the page must name the hotel and show its listed address or phone.
+    """
+    scored = [_score(row, p) for p in index.candidates(row.zip, row.state, row.city)]
+    if _has_rival(scored, index):
+        return None, ""
+    named = sorted((s for s in scored if s["name"] >= NAME_OK and s["place"].website
+                    and s["place"].business_status != "CLOSED_PERMANENTLY"), key=_rank, reverse=True)
+    on_file = [x for x in (normalize_url(row.url), checked.final_url) if x]
+    sites, working = [], ""
+    for s in named:
+        w = s["place"].website
+        if not any(same_site(w, x) for x in on_file + sites):
+            sites.append(w)
+    for w in sites[:MAX_OVERTURE_SITES]:
+        u = check_url(w, row.name, session, street=row.address, phone=row.phone)
+        if u.confirms_hotel:
+            shows = " and ".join(x for x, ok in (("address", u.address_on_page), ("phone", u.phone_on_page)) if ok)
+            res = Result(hotel_status=VERIFIED, verified_by="overture_website",
+                         confidence="HIGH" if u.address_on_page else "MEDIUM",
+                         match_notes=f"The hotel's website in Overture ({u.final_url or w}) shows the listed {shows}")
+            res.match_website = u.final_url or w
+            return res, res.match_website
+        if u.status in ("OK", "REDIRECTED") and not working:
+            working = u.final_url or w
+    return None, working
 
 
 def _is_hotel_record(p: Place, index) -> bool:
@@ -193,18 +234,49 @@ def _fill(res: Result, s: dict) -> None:
     res.name_score, res.address_match, res.phone_match = s["name"], s["addr"], s["phone"]
 
 
+@dataclass
+class FreeHints:
+    """What the free passes learned about a hotel they couldn't confirm."""
+    alt_site: str = ""        # working site from Overture that names the hotel (for suggested_url)
+    overture_hint: str = ""   # possible rebrand / closure, for review
+
+
+def overture_hint(row: HotelRow, index) -> str:
+    """Describe what Overture lists at this address, when that suggests a rebrand or closure."""
+    scored = [_score(row, p) for p in index.candidates(row.zip, row.state, row.city)]
+    ours = [s for s in scored if s["name"] >= NAME_OK and s["addr"] == "MATCH"]
+    others = sorted((s for s in scored if s["addr"] == "MATCH" and s["name"] < NAME_WEAK
+                     and _is_hotel_record(s["place"], index)),
+                    key=lambda s: -index.confidence.get(s["place"].place_id, 0))
+    names = " and ".join(f"'{n}'" for n in dict.fromkeys(s["place"].name for s in others[:2]))
+    if others and not ours:
+        return f"Possible rebrand: Overture lists {names} at this address, not this hotel"
+    if others:
+        return f"Overture lists this hotel and also {names} at this address"
+    if ours and all(s["place"].business_status == "CLOSED_PERMANENTLY" for s in ours):
+        return "Overture marks this hotel permanently closed"
+    return ""
+
+
 # --- the pipeline ---------------------------------------------------------------
-def free_passes(row: HotelRow, session: requests.Session, overture=None) -> tuple[Result | None, UrlResult]:
-    """Passes 1 and 2. Returns (result or None if still unconfirmed, website check)."""
+def free_passes(row: HotelRow, session: requests.Session, overture=None) -> tuple[Result | None, UrlResult, FreeHints]:
+    """Passes 1, 2 and 2b.
+
+    Returns (result or None if still unconfirmed, check of the URL on file, hints for unconfirmed hotels).
+    """
     u = check_url(row.url, row.name, session, street=row.address, phone=row.phone)
     if u.confirms_hotel:
         shows = [x for x, ok in (("address", u.address_on_page), ("phone", u.phone_on_page)) if ok]
         return Result(hotel_status=VERIFIED, verified_by="website",
                       confidence="HIGH" if u.address_on_page else "MEDIUM",
-                      match_notes=f"Hotel website shows the listed {' and '.join(shows)}"), u
-    if overture is not None:
-        return overture_confirm(row, overture), u
-    return None, u
+                      match_notes=f"Hotel website shows the listed {' and '.join(shows)}"), u, FreeHints()
+    if overture is None:
+        return None, u, FreeHints()
+    res = overture_confirm(row, overture)
+    if res:
+        return res, u, FreeHints()
+    res, alt = overture_website_confirm(row, overture, session, u)
+    return res, u, FreeHints(alt_site=alt, overture_hint="" if res else overture_hint(row, overture))
 
 
 def google_pass(row: HotelRow, client: PlacesClient) -> Result:
@@ -218,22 +290,34 @@ def unresolved(reason: str) -> Result:
     return Result(hotel_status=UNRESOLVED, match_notes=f"Not confirmed by free checks; {reason}")
 
 
-def finish(row: HotelRow, res: Result, u: UrlResult, session: requests.Session) -> Result:
-    """Attach the website check and the recommended action."""
+def finish(row: HotelRow, res: Result, u: UrlResult, session: requests.Session,
+           hints: FreeHints | None = None) -> Result:
+    """Attach the website check, the free-pass hints and the recommended action.
+
+    hints.alt_site is a working site from Overture that names the hotel (pass 2b). Google's Pro tier
+    returns no websites, so this is often the only replacement for a missing or dead URL.
+    """
+    hints = hints or FreeHints()
+    alt_site, res.overture_hint = hints.alt_site, hints.overture_hint
     if res.hotel_status == NAME_CHANGED and res.match_name and row.url:
         # a rebranded property's page should be judged against its new name
         u = check_url(row.url, res.match_name, session, street=row.address, phone=row.phone)
     _apply_url(res, row, u)
+    if (alt_site and not res.suggested_url and u.status != "OK"
+            and res.hotel_status in (VERIFIED, ADDRESS_MISMATCH, CLOSED_TEMPORARILY, UNRESOLVED)):
+        res.suggested_url = alt_site
+        res.url_notes = "; ".join(x for x in [res.url_notes, "suggested_url is the hotel's website in Overture "
+                                              "(names the hotel; address not shown)"] if x)
     res.action = _action(res)
     return res
 
 
 def validate_row(row: HotelRow, session: requests.Session, overture=None, client: PlacesClient | None = None) -> Result:
     """All passes for a single row (the CLI runs the passes in bulk instead, to report Google usage first)."""
-    res, u = free_passes(row, session, overture)
+    res, u, hints = free_passes(row, session, overture)
     if res is None:
         res = google_pass(row, client) if client else unresolved("Google lookup not enabled")
-    return finish(row, res, u, session)
+    return finish(row, res, u, session, hints)
 
 
 def _apply_url(res: Result, row: HotelRow, u: UrlResult) -> None:
@@ -261,7 +345,7 @@ def _action(r: Result) -> str:
     if s == CLOSED_TEMPORARILY:
         return "Review - temporarily closed; consider hiding listing"
     if s == UNRESOLVED:
-        return "Run Google pass or check manually"
+        return "Run Google pass or check manually" + (" - see overture_hint" if r.overture_hint else "")
     if s == ERROR:
         return "Re-run - lookup failed"
     url_action = {

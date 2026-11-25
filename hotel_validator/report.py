@@ -19,6 +19,15 @@ def _excel_safe(value):
     return ILLEGAL_CHARACTERS_RE.sub("", value) if isinstance(value, str) else value
 
 
+def _hint_kind(hint) -> str:
+    hint = str(hint or "")
+    if hint.startswith("Possible rebrand"):
+        return "Possible rebrand"
+    if "also" in hint:
+        return "Another hotel also at address"
+    return "Marked permanently closed" if "closed" in hint else ""
+
+
 def write_report(df: pd.DataFrame, path: str, places_calls: int) -> None:
     df = df.map(_excel_safe)
     summary = pd.concat([
@@ -26,6 +35,8 @@ def write_report(df: pd.DataFrame, path: str, places_calls: int) -> None:
         df["verified_by"].replace("", "(none)").value_counts().rename_axis("value").reset_index(name="count")
           .assign(check="Confirmed by"),
         df["url_status"].value_counts().rename_axis("value").reset_index(name="count").assign(check="URL"),
+        df["overture_hint"].map(_hint_kind).replace("", None).dropna().value_counts().rename_axis("value")
+          .reset_index(name="count").assign(check="Overture hint"),
     ])[["check", "value", "count"]]
     actions = df["action"].value_counts().rename_axis("action").reset_index(name="count")
 

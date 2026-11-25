@@ -123,6 +123,7 @@ def main(argv=None) -> int:
     rows = [row_of(r) for r in df.to_dict("records")]
     results: list[Result | None] = [None] * len(rows)
     url_checks = [None] * len(rows)
+    hints = [None] * len(rows)     # what the free passes learned about hotels they couldn't confirm
     local = threading.local()
 
     def session():
@@ -136,15 +137,19 @@ def main(argv=None) -> int:
     todo = [i for i in range(len(rows)) if results[i] is None]
 
     # Passes 1 + 2: free.
-    print("\nFree passes (hotel website, Overture open data)...")
-    free_error = lambda e: (None, UrlResult("ERROR", notes=f"Check failed: {e.__class__.__name__}: {e}"[:300]))
-    for i, (res, u) in run_parallel(lambda i: free_passes(rows[i], session(), overture), todo, args.workers,
+    print("\nFree passes (hotel website, Overture open data, Overture's website for the hotel)...")
+    free_error = lambda e: (None, UrlResult("ERROR", notes=f"Check failed: {e.__class__.__name__}: {e}"[:300]), None)
+    for i, (res, u, h) in run_parallel(lambda i: free_passes(rows[i], session(), overture), todo, args.workers,
                                     "free", free_error).items():
-        results[i], url_checks[i] = res, u
+        results[i], url_checks[i], hints[i] = res, u, h
     remaining = [i for i in todo if results[i] is None]
     by = pd.Series([results[i].verified_by for i in todo if results[i]]).value_counts()
-    print(f"Confirmed for free: website {by.get('website', 0)}, overture {by.get('overture', 0)}. "
+    print(f"Confirmed for free: website {by.get('website', 0)}, overture {by.get('overture', 0)}, "
+          f"Overture's website {by.get('overture_website', 0)}. "
           f"Still unconfirmed: {len(remaining)}")
+    flagged = sum(bool(hints[i] and hints[i].overture_hint) for i in remaining)
+    if flagged:
+        print(f"  {flagged} of those have an overture_hint (possible rebrand or closure) in the output.")
 
     # Pass 3: Google, for what's left.
     if remaining and client:
@@ -178,7 +183,7 @@ def main(argv=None) -> int:
                       "Google not run" if args.max_google is None else "over --max-google limit for this run")
             results[i] = unresolved(reason)
     for i in todo:
-        results[i] = finish(rows[i], results[i], url_checks[i], session())
+        results[i] = finish(rows[i], results[i], url_checks[i], session(), hints[i])
 
     out = pd.concat([df, pd.DataFrame([r.as_dict() for r in results])], axis=1)
     out_path = Path(args.output) if args.output else src.with_name(f"{src.stem}_validated.xlsx")

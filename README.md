@@ -3,13 +3,14 @@
 Checks an Excel extract of TravelPets hotel listings and reports, for each hotel, whether it is
 **still at the listed address**, and whether its **website still works and belongs to that hotel**.
 
-To keep paid API use low, every hotel goes through up to three passes and stops at the first one that
+To keep paid API use low, every hotel goes through up to four passes and stops at the first one that
 confirms it:
 
 | Pass | Cost | Confirms the hotel when... |
 |---|---|---|
 | 1. Hotel website | free | the page loads, names the hotel, and shows its street address or phone number |
 | 2. [Overture Maps](https://overturemaps.org) open data | free | an open lodging record has the same name and address, and no *other* hotel is listed there |
+| 2b. The hotel's website in Overture | free | Overture lists a different website for the hotel than the one on file, and that page names the hotel and shows its address or phone |
 | 3. Google Places API | paid | everything else. Also the only pass that can report closed, moved or rebranded |
 
 **The free passes only confirm hotels.** They never mark a hotel as closed or changed, because stale
@@ -118,11 +119,17 @@ database ID, are kept in the output, so results can be matched back to the datab
 | `ERROR` | The check itself failed unexpectedly (see `url_notes`). Re-run |
 
 Other useful columns:
-- `verified_by`: which pass confirmed the hotel (`website`, `overture` or `google`).
+- `verified_by`: which pass confirmed the hotel (`website`, `overture`, `overture_website` or `google`).
 - `match_name`, `match_address`, `match_phone`, `match_website`: what Overture or Google has on file.
 - `url_shows_address`: whether the hotel's page shows its address.
 - `url_matches_reference`: whether the listed site matches the one Overture or Google has.
-- `suggested_url`: a replacement website when the listed one is missing, broken or different.
+- `suggested_url`: a replacement website when the listed one is missing, broken or different. It comes
+  from Overture (or Google on the `enterprise` tier). When `url_notes` says "address not shown", the
+  page names the hotel but doesn't show its address, so give it a quick look before using it.
+- `overture_hint`: for hotels the free passes couldn't confirm, what Overture lists at the address when
+  that suggests a change, e.g. *Possible rebrand: Overture lists 'Ramada by Wyndham' at this address,
+  not this hotel*. It's a lead for review, never a verdict (Overture keeps stale records), and it never
+  changes `hotel_status`. The Summary sheet counts them.
 - `action`: a plain-English next step.
 - `google_maps_url`: links to the place for quick manual checks.
 

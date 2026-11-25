@@ -59,7 +59,16 @@ def token_coverage(needle: str, haystack: str) -> float:
 
 def core_words(name: str, ignore: str = "") -> str:
     skip = NAME_NOISE | LOCATION_NOISE | set(re.findall(r"[a-z0-9']+", ignore.lower()))
-    return " ".join(w for w in re.findall(r"[a-z0-9']+", name.lower()) if w not in skip)
+    return " ".join(_singular(w) for w in re.findall(r"[a-z0-9']+", name.lower()) if w not in skip)
+
+
+def _singular(word: str) -> str:
+    """Crude plural folding so "Efficiencies" matches "Efficiency" and "Cottages" matches "Cottage"."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
 
 
 def normalize_street(street: str) -> str:

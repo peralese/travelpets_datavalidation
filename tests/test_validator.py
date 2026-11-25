@@ -278,3 +278,77 @@ def test_one_bad_row_does_not_stop_the_run():
 def test_redirect_to_domain_marketplace_is_parked_not_blocked():
     sold = FakeResp(403, "", url="https://www.hugedomains.com/domain_profile.cfm?d=oldhotel.com")
     assert check_url("oldhotel.com", ROW.name, FakeSession(sold)).status == "PARKED"
+
+
+# --- pass 2b: the hotel's website as listed in Overture ----------------------
+class ExplodingSession:
+    def get(self, url, **kw):
+        raise AssertionError(f"should not fetch {url}")
+
+
+def _overture_with_site(name=ROW.name, street="200 San Jacinto Blvd", phone="(512) 555-9999", **kw):
+    # different phone, so pass 2 (Overture record alone) rejects it and pass 2b decides
+    return FakeOverture([place(name, street, "78701", phone=phone, website="https://hamptonaustin.com/", **kw)])
+
+
+def test_overture_website_confirms_hotel_with_no_url_on_file():
+    c = FakeClient()
+    r = v.validate_row(ROW, FakeSession(FakeResp(200, HOTEL_PAGE, "https://hamptonaustin.com/")),
+                       overture=_overture_with_site(), client=c)
+    assert (r.hotel_status, r.verified_by, r.confidence) == ("VERIFIED", "overture_website", "HIGH")
+    assert c.calls == 0 and r.suggested_url == "https://hamptonaustin.com/" and r.url_status == "MISSING"
+    assert "see suggested_url" in r.action
+
+
+def test_overture_website_that_names_hotel_without_address_is_only_suggested():
+    page = FakeResp(200, f"<title>{ROW.name}</title><p>Book now!</p>", "https://hamptonaustin.com/")
+    r = v.validate_row(ROW, FakeSession(page), overture=_overture_with_site())
+    assert r.hotel_status == "UNRESOLVED" and r.suggested_url == "https://hamptonaustin.com/"
+    assert "address not shown" in r.url_notes
+
+
+def test_overture_website_skipped_for_rebrands_and_closures():
+    rival = _overture_with_site()
+    rival.places.append(place("Holiday Inn Express Austin Downtown", "200 San Jacinto Blvd", "78701"))
+    closed = _overture_with_site(status="CLOSED_PERMANENTLY")
+    for o in (rival, closed):
+        r = v.validate_row(ROW, ExplodingSession(), overture=o)
+        assert r.hotel_status == "UNRESOLVED" and not r.suggested_url
+
+
+def test_overture_website_not_rechecked_when_same_as_url_on_file():
+    row = v.HotelRow(**{**ROW.__dict__, "url": "hamptonaustin.com"})
+    page = FakeResp(200, f"<title>{ROW.name}</title><p>Book now!</p>", "https://hamptonaustin.com/")
+
+    class CountingSession(FakeSession):
+        n = 0
+
+        def get(self, url, **kw):
+            CountingSession.n += 1
+            return super().get(url, **kw)
+    r = v.validate_row(row, CountingSession(page), overture=_overture_with_site())
+    assert CountingSession.n == 1 and r.hotel_status == "UNRESOLVED"
+
+
+# --- overture_hint: free leads on rebrands / closures --------------------
+def test_hint_possible_rebrand_when_only_another_hotel_at_address():
+    o = FakeOverture([place("Ramada by Wyndham Austin", "200 San Jacinto Blvd", "78701")])
+    r = v.validate_row(ROW, FakeSession(), overture=o)
+    assert r.hotel_status == "UNRESOLVED"  # a hint is never a verdict
+    assert r.overture_hint.startswith("Possible rebrand") and "Ramada by Wyndham Austin" in r.overture_hint
+    assert "overture_hint" in r.action
+
+
+def test_hint_both_hotels_and_closed():
+    both = FakeOverture([place(ROW.name, "200 San Jacinto Blvd", "78701", phone="(512) 555-9999"),
+                         place("Ramada by Wyndham Austin", "200 San Jacinto Blvd", "78701")])
+    assert v.validate_row(ROW, FakeSession(), overture=both).overture_hint.startswith("Overture lists this hotel and also")
+    closed = FakeOverture([place(ROW.name, "200 San Jacinto Blvd", "78701", status="CLOSED_PERMANENTLY")])
+    assert v.validate_row(ROW, FakeSession(), overture=closed).overture_hint == "Overture marks this hotel permanently closed"
+    assert v.validate_row(ROW, FakeSession(), overture=FakeOverture([])).overture_hint == ""
+
+
+def test_plural_names_match():
+    assert name_score("Adirondack Efficiency Hotel", "Adirondack Efficiencies") >= 80
+    assert name_score("Lakeside Cottages", "Lakeside Cottage") >= 80
+    assert name_score("Hampton Inn Austin", "Motel 6 Austin") < 60
