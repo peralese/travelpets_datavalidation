@@ -23,7 +23,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from hotel_validator.columns import clean, clean_zip, map_columns
+from hotel_validator.columns import clean, clean_zip, map_columns, merge_duplicate_ids
 from hotel_validator.overture import OvertureIndex
 from hotel_validator.places import PlacesAuthError, PlacesClient
 from hotel_validator.report import write_report
@@ -35,7 +35,7 @@ from hotel_validator.validate import (HotelRow, Result, _query, finish, free_pas
 # https://developers.google.com/maps/billing-and-pricing/pricing
 FREE_PER_MONTH = {"pro": 5000, "enterprise": 1000}
 PRICE_PER_1000 = {"pro": 32, "enterprise": 35}
-FIELDS = ("name", "address", "city", "state", "zip", "phone", "url")
+FIELDS = ("id", "name", "address", "city", "state", "zip", "phone", "url")
 
 
 def load_env(path: Path) -> None:
@@ -82,6 +82,7 @@ def main(argv=None) -> int:
                          "enterprise: adds Google's phone + website, only 1,000 free/month")
     ap.add_argument("--yes", "-y", action="store_true", help="don't ask before using Google")
     ap.add_argument("--no-overture", action="store_true", help="skip the Overture open-data pass")
+    ap.add_argument("--no-merge", action="store_true", help="don't combine rows that share a hotel ID")
     ap.add_argument("--refresh-overture", action="store_true", help="download the latest Overture release")
     ap.add_argument("--workers", type=int, default=8, help="parallel rows (default 8)")
     for f in FIELDS:
@@ -97,9 +98,13 @@ def main(argv=None) -> int:
     sheet = int(args.sheet) if str(args.sheet).isdigit() else args.sheet
     df = pd.read_csv(src, dtype=str) if src.suffix.lower() == ".csv" else pd.read_excel(src, sheet_name=sheet, dtype=str)
     df = df.dropna(how="all").reset_index(drop=True)
+    cols = map_columns(df, {f: getattr(args, f"col_{f}") for f in FIELDS})
+    if "id" in cols and not args.no_merge:
+        df, merged = merge_duplicate_ids(df, cols["id"])
+        if merged:
+            print(f"Merged {merged} duplicate rows that share a {cols['id']} (one row per hotel; --no-merge to keep them)")
     if args.limit:
         df = df.head(args.limit)
-    cols = map_columns(df, {f: getattr(args, f"col_{f}") for f in FIELDS})
     print(f"Read {len(df)} rows from {src.name}. Columns: " + ", ".join(f"{k}='{v}'" for k, v in cols.items()))
 
     client = None

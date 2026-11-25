@@ -75,6 +75,10 @@ copy is replaced with the newest release automatically, so a yearly run always u
 
 Without a `GOOGLE_MAPS_API_KEY` the tool runs the free passes only. `--no-overture` skips pass 2.
 
+Rows that share a hotel ID (*id_hotel / Hotel ID / ID*) are merged into one, keeping every
+non-empty value. The TravelPets export lists each hotel with a pet restriction twice, once with it and
+once without. `--no-merge` keeps the rows as they are.
+
 Columns are found automatically by header name (for example *Hotel Name / Name*, *Address / Street*,
 *City*, *State*, *Zip / Zip Code / Postal Code*, *Phone*, *URL / Website*). If a header isn't
 recognised, name it explicitly, for example `--col-name "Property"`. City is optional. Leading zeros

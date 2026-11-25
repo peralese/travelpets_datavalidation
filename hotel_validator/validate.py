@@ -17,7 +17,8 @@ from dataclasses import asdict, dataclass
 
 import requests
 
-from .matching import address_match, name_score, phone_match, same_brand
+from .matching import (address_match, name_score, normalize_street, phone_match, same_brand, street_line,
+                       street_number)
 from .places import Place, PlacesClient, PlacesError
 from .url_check import UrlResult, check_url, normalize_url, same_site
 
@@ -179,7 +180,13 @@ def _same_hotel(row: HotelRow, s: dict) -> bool:
     """
     if s["addr"] == "MATCH":
         return s["name"] >= NAME_WEAK or same_brand(row.name, s["place"].name, f"{row.city} {row.state}")
-    return s["addr"] == "PARTIAL" and s["name"] >= NAME_WEAK
+    if s["addr"] != "PARTIAL":
+        return False
+    # Same zip, close address. If both have street numbers and they differ, it may be another branch
+    # in the same zip, so the name must be a strong match; if ours has no number ("I-95 Exit 77 / ..."),
+    # a similar name is enough.
+    ours, theirs = street_number(normalize_street(street_line(row.address))), street_number(normalize_street(s["place"].street))
+    return s["name"] >= (NAME_OK if ours and theirs and ours != theirs else NAME_WEAK)
 
 
 def find_hotel(row: HotelRow, client: PlacesClient) -> Result:

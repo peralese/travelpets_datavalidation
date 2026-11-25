@@ -253,7 +253,7 @@ def test_cache_separate_per_tier(tmp_path):
 def test_travelpets_export_headers():
     df = pd.DataFrame(columns=["id_hotel", "hotelName", "address", "postal", "phone", "city", "id_country",
                                "id_region", "webAddress"])
-    assert map_columns(df) == {"name": "hotelName", "address": "address", "state": "id_region", "zip": "postal",
+    assert map_columns(df) == {"id": "id_hotel", "name": "hotelName", "address": "address", "state": "id_region", "zip": "postal",
                                "phone": "phone", "city": "city", "url": "webAddress"}
 
 
@@ -397,3 +397,20 @@ def test_lodging_at_address_from_first_search_saves_a_request():
 def test_sharing_only_the_city_name_is_not_a_match():
     assert name_score("Florence Villager Lodge", "Florence Inn and Suites", "Florence SC") < 60
     assert name_score("Lake Placid Inn", "Lake Placid Hotel", "Lake Placid NY") >= 80
+
+
+def test_other_street_number_in_same_zip_needs_a_strong_name():
+    row = v.HotelRow("La Quinta Inn Denver Airport", "3975 Peoria Way", "Denver", "TX", "78701", "", "")
+    p = place("La Quinta Inn & Suites by Wyndham Denver Gateway Park", "4460 Peoria Way", "78701")
+    assert v.find_hotel(row, FakeClient([p])).hotel_status != "VERIFIED"
+
+
+def test_rows_sharing_an_id_are_merged_keeping_values():
+    from hotel_validator.columns import merge_duplicate_ids
+    df = pd.DataFrame({"id_hotel": ["1407", "9", "1407", None, "5", "5"],
+                       "hotelName": ["Comfort Inn", "Other", "Comfort Inn", "No ID", "Two", "Two"],
+                       "restrictions": ["Pets are Welcome", None, None, "x", "Small dogs", "Cats too"]})
+    out, n = merge_duplicate_ids(df, "id_hotel")
+    blank = lambda xs: [None if pd.isna(x) else x for x in xs]
+    assert n == 2 and blank(out.id_hotel) == ["1407", "9", "5", None]
+    assert blank(out.restrictions) == ["Pets are Welcome", None, "Small dogs | Cats too", "x"]

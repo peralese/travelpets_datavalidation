@@ -6,6 +6,7 @@ import pandas as pd
 
 # Canonical field -> accepted header spellings (compared after normalising).
 ALIASES = {
+    "id": ["id_hotel", "hotel id", "hotel_id", "hotelid", "id"],
     "name": ["hotel name", "hotel", "name", "property", "property name", "hotelname"],
     "address": ["address", "street", "street address", "address1", "address 1", "addr"],
     "city": ["city", "town"],
@@ -60,3 +61,25 @@ def clean_zip(value) -> str:
     if text.isdigit() and len(text) < 5:
         text = text.zfill(5)
     return text
+
+
+def merge_duplicate_ids(df: pd.DataFrame, id_col: str) -> tuple[pd.DataFrame, int]:
+    """Collapse rows that share an ID into one, keeping every non-empty value.
+
+    The TravelPets export lists each hotel that has a pet restriction twice (once with it, once
+    without). Different non-empty values for the same ID are kept, joined with " | ".
+    Rows without an ID are left alone. Returns (merged frame, number of rows removed).
+    """
+    ids = df[id_col].map(clean)
+    if not ids.duplicated().any() or ids.eq("").all():
+        return df, 0
+
+    def combine(values):
+        seen = list(dict.fromkeys(clean(v) for v in values if clean(v)))
+        return " | ".join(seen) if seen else None
+
+    has_id = df[ids != ""]
+    merged = (has_id.groupby(ids[ids != ""], sort=False).agg(combine).reset_index(drop=True))
+    merged[id_col] = list(dict.fromkeys(ids[ids != ""]))
+    out = pd.concat([merged, df[ids == ""]], ignore_index=True)[list(df.columns)]
+    return out, len(df) - len(out)
